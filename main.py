@@ -18,11 +18,12 @@ from contextlib import asynccontextmanager
 # =====================
 load_dotenv()
 
-TOKEN = os.getenv("TOKEN")
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
-GUILD_ID = int(os.getenv("GUILD_ID"))
+# We add .strip() to prevent hidden spaces from breaking the URL
+TOKEN = os.getenv("TOKEN").strip()
+CLIENT_ID = os.getenv("CLIENT_ID").strip()
+CLIENT_SECRET = os.getenv("CLIENT_SECRET").strip()
+REDIRECT_URI = os.getenv("REDIRECT_URI").strip()
+GUILD_ID = int(os.getenv("GUILD_ID").strip())
 
 DISCORD_API = "https://discord.com/api"
 
@@ -47,22 +48,14 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 MY_GUILD = discord.Object(id=GUILD_ID)
 
-# =====================
-# FASTAPI & LIFESPAN (FIXES RUNTIME ERROR)
-# =====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This runs when the server starts
     asyncio.create_task(bot.start(TOKEN))
     yield
-    # This runs when the server stops
     await bot.close()
 
 app = FastAPI(lifespan=lifespan)
 
-# =====================
-# RANK MAP
-# =====================
 RANK_ROLES = {
     "Supersonic Legend": "Supersonic Legend",
     "Grand Champion": "Grand Champion",
@@ -86,18 +79,18 @@ def fetch_tracker_data(epic_name):
 # =====================
 @app.get("/login")
 def login():
-    # We must URL-encode the redirect_uri so it is valid in a query string
-    encoded_uri = urllib.parse.quote(REDIRECT_URI)
-    
-    url = (
-        f"{DISCORD_API}/oauth2/authorize"
-        f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={encoded_uri}"
-        f"&response_type=code"
-        f"&scope=identify%20connections"
-    )
+    # FIX: We use urlencode on a dictionary to ensure EVERY character 
+    # (including slashes) is perfectly encoded for Discord.
+    params = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": "identify connections"
+    }
+    query_string = urllib.parse.urlencode(params)
+    url = f"{DISCORD_API}/oauth2/authorize?{query_string}"
     return RedirectResponse(url)
-    
+
 @app.get("/callback")
 async def callback(code: str):
     # Exchange code for token
@@ -115,13 +108,12 @@ async def callback(code: str):
 
     access_token = token_data.get("access_token")
     if not access_token:
-        return {"error": "Failed to get Discord token"}
+        return {"error": "Failed to get Discord token", "debug": token_data}
 
     headers = {"Authorization": f"Bearer {access_token}"}
     user = requests.get(f"{DISCORD_API}/users/@me", headers=headers).json()
     connections = requests.get(f"{DISCORD_API}/users/@me/connections", headers=headers).json()
 
-    # Find the Epic Games connection name
     epic_connected_name = None
     for conn_item in connections:
         if conn_item["type"] == "epicgames":
@@ -129,14 +121,13 @@ async def callback(code: str):
             break
 
     if not epic_connected_name:
-        return {"error": "No Epic Games account is connected to your Discord profile."}
+        return {"error": "No Epic Games account is connected to your Discord profile. Please add it in Discord Settings > Connections."}
 
-    # Save the REAL connected name to the database
     c.execute("INSERT OR REPLACE INTO verified_users (discord_id, epic_name) VALUES (?, ?)", 
               (int(user["id"]), epic_connected_name))
     conn.commit()
 
-    return {"success": True, "message": f"Successfully linked! You can now use /link in Discord with the name: {epic_connected_name}"}
+    return {"success": True, "message": f"Successfully verified as Epic User: {epic_connected_name}. You can now use /link in the server!"}
 
 # =====================
 # SLASH COMMAND (The Comparison Logic)
@@ -145,26 +136,28 @@ async def callback(code: str):
 async def link(interaction: discord.Interaction, epic_name: str):
     await interaction.response.defer()
 
-    # 1. Check if they have done the OAuth2 /login
     c.execute("SELECT epic_name FROM verified_users WHERE discord_id = ?", (interaction.user.id,))
     row = c.fetchone()
     
     if not row:
-        login_url = REDIRECT_URI.replace("/callback", "/login")
-        return await interaction.followup.send(f"❌ You must first link your Epic account here: {login_url}")
+        # Construct the login URL dynamically based on current domain
+        login_url = f"{REDIRECT_URI.rsplit('/', 1)[0]}/login"
+        return await interaction.followup.send(f"❌ You haven't verified your Epic connection yet! Link here: {login_url}")
 
     connected_epic = row[0]
 
-    # 2. COMPARE: Provided name vs Connected name
+    # THE COMPARISON: Provided name vs Real Connected name
     if epic_name.lower() != connected_epic.lower():
-        return await interaction.followup.send(f"❌ Error: The name you provided (`{epic_name}`) doesn't match the account connected to your Discord (`{connected_epic}`).")
+        return await interaction.followup.send(
+            f"❌ **Error:** The name you provided (`{epic_name}`) doesn't match your connected Discord account (`{connected_epic}`). "
+            "Please use the exact name shown on your Discord profile connections!"
+        )
 
-    # 3. Proceed if they match
     await interaction.followup.send(f"✅ Identity verified! Fetching rank for `{connected_epic}`...")
     
     response = await asyncio.to_thread(fetch_tracker_data, connected_epic)
     if response.status_code != 200:
-        return await interaction.followup.send("❌ Tracker API failed. Make sure your profile is public on Tracker.gg.")
+        return await interaction.followup.send("❌ Tracker API failed. Ensure your Epic profile is Public on Tracker.gg.")
 
     data = response.json()
     segments = data.get("data", {}).get("segments", [])
@@ -176,33 +169,31 @@ async def link(interaction: discord.Interaction, epic_name: str):
             break
 
     if not rank:
-        return await interaction.followup.send(f"❌ No 2v2 rank found for `{connected_epic}`.")
+        return await interaction.followup.send(f"❌ No 2v2 rank data found for `{connected_epic}`.")
 
-    # 4. Map and Assign Role
+    # Map rank to role
     role_name = next((RANK_ROLES[k] for k in RANK_ROLES if rank.startswith(k)), None)
     role = discord.utils.get(interaction.guild.roles, name=role_name)
 
     if role:
         try:
-            # Remove old rank roles
+            # Cleanup old ranks
             old_roles = [r for r in interaction.user.roles if r.name in RANK_ROLES.values() and r.id != role.id]
             if old_roles: await interaction.user.remove_roles(*old_roles)
             
             await interaction.user.add_roles(role)
-            await interaction.followup.send(f"🎉 Rank verified: **{rank}**. Role assigned!")
+            await interaction.followup.send(f"🎉 Rank verified: **{rank}**. Your role has been updated!")
         except discord.Forbidden:
-            await interaction.followup.send("❌ I don't have permission to manage your roles.")
+            await interaction.followup.send("❌ Permission Error: Move my Bot Role to the TOP of the role list!")
     else:
-        await interaction.followup.send(f"⚠️ Could not find a server role for the rank: {rank}")
+        await interaction.followup.send(f"⚠️ Found rank {rank}, but no matching role exists in this server.")
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     await bot.tree.sync(guild=MY_GUILD)
 
-# =====================
-# RUN APPLICATION
-# =====================
 if __name__ == "__main__":
-    # Start the FastAPI server (which handles the bot via lifespan)
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    # Standard Railway port logic
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
