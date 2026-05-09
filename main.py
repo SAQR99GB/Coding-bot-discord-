@@ -86,15 +86,18 @@ def fetch_tracker_data(epic_name):
 # =====================
 @app.get("/login")
 def login():
+    # We must URL-encode the redirect_uri so it is valid in a query string
+    encoded_uri = urllib.parse.quote(REDIRECT_URI)
+    
     url = (
         f"{DISCORD_API}/oauth2/authorize"
         f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"&redirect_uri={encoded_uri}"
         f"&response_type=code"
         f"&scope=identify%20connections"
     )
     return RedirectResponse(url)
-
+    
 @app.get("/callback")
 async def callback(code: str):
     # Exchange code for token
