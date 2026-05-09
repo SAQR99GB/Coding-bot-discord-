@@ -9,11 +9,10 @@ import cloudscraper
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
-from threading import Thread
 from discord.ext import commands
 
 # =====================
-# ENV LOAD
+# ENV
 # =====================
 load_dotenv()
 
@@ -26,7 +25,7 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 DISCORD_API = "https://discord.com/api"
 
 # =====================
-# BOT SETUP
+# DISCORD BOT
 # =====================
 intents = discord.Intents.default()
 intents.members = True
@@ -50,7 +49,7 @@ CREATE TABLE IF NOT EXISTS verified_users (
 conn.commit()
 
 # =====================
-# ROLES
+# RANK MAP
 # =====================
 RANK_ROLES = {
     "Supersonic Legend": "Supersonic Legend",
@@ -103,7 +102,6 @@ async def callback(code: str):
     ).json()
 
     access_token = token.get("access_token")
-
     if not access_token:
         return {"error": "Token failed"}
 
@@ -161,6 +159,13 @@ async def link(interaction: discord.Interaction, epic_name: str):
 
     await interaction.followup.send(f"Checking rank for {epic_name}...")
 
+    response = await asyncio.to_thread(fetch_tracker_data, epic_name)
+
+    if response.status_code != 200:
+        return await interaction.followup.send("Tracker API failed ❌")
+
+    await interaction.followup.send("Tracker OK ✅")
+
 # =====================
 # SYNC COMMANDS
 # =====================
@@ -175,16 +180,6 @@ async def on_ready():
         print("Sync error:", e)
 
 # =====================
-# RUN FASTAPI
-# =====================
-def run_api():
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-Thread(target=run_api).start()
-
-# =====================
-# RUN BOT
+# START BOT ONLY (IMPORTANT FIX)
 # =====================
 bot.run(TOKEN)
